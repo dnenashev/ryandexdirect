@@ -1,185 +1,131 @@
-yadirGetCampaign <-
-  function (Logins          = getOption("ryandexdirect.user"), 
-            States          = c("OFF","ON","SUSPENDED","ENDED","CONVERTED","ARCHIVED"),
-            Types           = c("TEXT_CAMPAIGN", "MOBILE_APP_CAMPAIGN", "DYNAMIC_TEXT_CAMPAIGN", "CPM_BANNER_CAMPAIGN", "SMART_CAMPAIGN"),
-            Statuses        = c("ACCEPTED","DRAFT","MODERATION","REJECTED"),
-            StatusesPayment = c("DISALLOWED","ALLOWED"),
-            Token           = NULL,
-            AgencyAccount   = getOption("ryandexdirect.agency_account"),
-            TokenPath       = yadirTokenPath()) {
+yadirGetCampaign <- function(
+      Logins = getOption("ryandexdirect.user"), 
+      States = c("OFF", "ON", "SUSPENDED", "ENDED", "CONVERTED", "ARCHIVED"),
+      Types = c("TEXT_CAMPAIGN", "MOBILE_APP_CAMPAIGN", "DYNAMIC_TEXT_CAMPAIGN", "CPM_BANNER_CAMPAIGN", "SMART_CAMPAIGN", "UNIFIED_CAMPAIGN"),
+      Statuses = c("ACCEPTED", "DRAFT", "MODERATION", "REJECTED"),
+      StatusesPayment = c("DISALLOWED", "ALLOWED"),
+      Token = NULL,
+      AgencyAccount = getOption("ryandexdirect.agency_account"),
+      TokenPath = yadirTokenPath()
+  ) {
+    start_time <- Sys.time()
     
-    # start time
-    start_time  <- Sys.time()
+    # Вспомогательная функция для обработки null значений
+    handle_null <- function(value, default = NA) {
+      if (is.null(value)) return(default)
+      return(value)
+    }
     
-    # result frame
-    result       <- data.frame(Id = character(0),
-                               Name = character(0),
-                               Type = character(0),
-                               Status = character(0),
-                               State = character(0),
-                               StatusPayment = character(0),
-                               SourceId = double(0),
-                               DailyBudgetAmount = double(0),
-                               DailyBudgetMode = character(0),
-                               Currency = character(0),
-                               StartDate = as.Date(character(0)),
-                               Impressions = integer(0),
-                               Clicks = integer(0),
-                               ClientInfo = character(0),
-                               FundsMode = character(0),
-                               CampaignFundsBalance = double(0),
-                               CampaignFundsBalanceBonus = double(0),
-                               CampaignFundsSumAvailableForTransfer = double(0),
-                               SharedAccountFundsRefund = double(0),
-                               SharedAccountFundsSpend = double(0),
-                               TextCampBidStrategySearchType   = character(0),
-                               TextCampBidStrategyNetworkType  = character(0),
-                               TextCampAttributionModel        = character(0),
-                               DynCampBidStrategySearchType    = character(0),
-                               DynCampBidStrategyNetworkType   = character(0),
-                               DynCampAttributionModel         = character(0),
-                               MobCampBidStrategySearchType    = character(0),
-                               MobCampBidStrategyNetworkType   = character(0),
-                               CpmBannerBidStrategySearchType  = character(0),
-                               CpmBannerBidStrategyNetworkType = character(0),
-                               Login = character(0),
-                               stringsAsFactors=FALSE)
+    create_query_body <- function(States, Types, Statuses, StatusesPayment, lim) {
+      list(
+        method = "get",
+        params = list(
+          SelectionCriteria = list(
+            States = States,
+            Types = Types,
+            StatusesPayment = StatusesPayment,
+            Statuses = Statuses
+          ),
+          FieldNames = c(
+            "Id", "Name", "Type", "StartDate", "Status", "StatusPayment", "SourceId", "State",
+            "Statistics", "Funds", "Currency", "DailyBudget", "ClientInfo"
+          ),
+          TextCampaignFieldNames = c("BiddingStrategy", "AttributionModel"),
+          MobileAppCampaignFieldNames = list("BiddingStrategy"),
+          DynamicTextCampaignFieldNames = c("BiddingStrategy", "AttributionModel"),
+          CpmBannerCampaignFieldNames = list("BiddingStrategy"),
+          Page = list(Limit = 10000, Offset = lim)
+        )
+      )
+    }
     
-    # filters
-    States          <- paste("\"",States,"\"",collapse=", ",sep="")
-    Types           <- paste("\"",Types,"\"",collapse=", ",sep="")
-    Statuses        <- paste("\"",Statuses,"\"",collapse=", ",sep="")
-    StatusesPayment <- paste("\"",StatusesPayment,"\"",collapse=", ",sep="")
+    process_campaign_data <- function(campaign, login) {
+      tibble(
+        Id = handle_null(campaign$Id),
+        Name = handle_null(campaign$Name),
+        Type = handle_null(campaign$Type),
+        Status = handle_null(campaign$Status),
+        State = handle_null(campaign$State),
+        StatusPayment = handle_null(campaign$StatusPayment),
+        SourceId = handle_null(campaign$SourceId),
+        DailyBudgetAmount = handle_null(campaign$DailyBudget$Amount) / 1000000,
+        DailyBudgetMode = handle_null(campaign$DailyBudget$Mode),
+        Currency = handle_null(campaign$Currency),
+        StartDate = handle_null(campaign$StartDate),
+        Impressions = handle_null(campaign$Statistics$Impressions),
+        Clicks = handle_null(campaign$Statistics$Clicks),
+        ClientInfo = handle_null(campaign$ClientInfo),
+        FundsMode = handle_null(campaign$Funds$Mode),
+        CampaignFundsBalance = handle_null(campaign$Funds$CampaignFunds$Balance) / 1000000,
+        CampaignFundsBalanceBonus = handle_null(campaign$Funds$CampaignFunds$BalanceBonus) / 1000000,
+        CampaignFundsSumAvailableForTransfer = handle_null(campaign$Funds$CampaignFunds$SumAvailableForTransfer) / 1000000,
+        SharedAccountFundsRefund = handle_null(campaign$Funds$SharedAccountFunds$Refund) / 1000000,
+        SharedAccountFundsSpend = handle_null(campaign$Funds$SharedAccountFunds$Spend) / 1000000,
+        TextCampBidStrategySearchType = handle_null(campaign$TextCampaign$BiddingStrategy$Search$BiddingStrategyType, ""),
+        TextCampBidStrategyNetworkType = handle_null(campaign$TextCampaign$BiddingStrategy$Network$BiddingStrategyType, ""),
+        TextCampAttributionModel = handle_null(campaign$TextCampaign$AttributionModel, ""),
+        DynCampBidStrategySearchType = handle_null(campaign$DynamicTextCampaign$BiddingStrategy$Search$BiddingStrategyType, ""),
+        DynCampBidStrategyNetworkType = handle_null(campaign$DynamicTextCampaign$BiddingStrategy$Network$BiddingStrategyType, ""),
+        DynCampAttributionModel = handle_null(campaign$DynamicTextCampaign$AttributionModel, ""),
+        MobCampBidStrategySearchType = handle_null(campaign$MobileAppCampaign$BiddingStrategy$Search$BiddingStrategyType, ""),
+        MobCampBidStrategyNetworkType = handle_null(campaign$MobileAppCampaign$BiddingStrategy$Network$BiddingStrategyType, ""),
+        CpmBannerBidStrategySearchType = handle_null(campaign$CpmBannerCampaign$BiddingStrategy$Search$BiddingStrategyType, ""),
+        CpmBannerBidStrategyNetworkType = handle_null(campaign$CpmBannerCampaign$BiddingStrategy$Network$BiddingStrategyType, ""),
+        Login = login
+      )
+    }
     
-    # offset
     lim <- 0
+    packageStartupMessage("Processing", appendLF = FALSE)
     
-    # start message
-    packageStartupMessage("Processing", appendLF = F)
+    result <- tibble()
     
-    while(lim != "stoped") {  
-      # compose query body
-      queryBody <- paste0("{
-                          \"method\": \"get\",
-                          \"params\": { 
-                          \"SelectionCriteria\": {
-                          \"States\": [",States,"],        
-                          \"Types\": [",Types,"],
-                          \"StatusesPayment\": [",StatusesPayment,"],
-                          \"Statuses\": [",Statuses,"]},
-                          \"FieldNames\": [
-                                      \"Id\",
-                                      \"Name\",
-                                      \"Type\",
-                                      \"StartDate\",
-                                      \"Status\",
-                                      \"StatusPayment\",
-                                      \"SourceId\",
-                                      \"State\",
-                                      \"Statistics\",
-                                      \"Funds\",
-                                      \"Currency\",
-                                      \"DailyBudget\",
-                                      \"ClientInfo\"],
-                          \"TextCampaignFieldNames\": [\"BiddingStrategy\",\"AttributionModel\"],
-                          \"MobileAppCampaignFieldNames\": [\"BiddingStrategy\"],
-                          \"DynamicTextCampaignFieldNames\": [\"BiddingStrategy\",\"AttributionModel\"],
-                          \"CpmBannerCampaignFieldNames\": [\"BiddingStrategy\"],
-                          \"Page\": {  
-                          \"Limit\": 10000,
-                          \"Offset\": ",lim,"
-    }
-    }
-    }")
-
+    while (lim != "stoped") {
+      query_body <- create_query_body(States, Types, Statuses, StatusesPayment, lim)
+      print(query_body)
       
-      
-      for(l in 1:length(Logins)){
-        # auth
-        Token <- tech_auth(login = Logins[l], token = Token, AgencyAccount = AgencyAccount, TokenPath = TokenPath)
+      for (login in Logins) {
+        Token <- tech_auth(login = login, token = Token, AgencyAccount = AgencyAccount, TokenPath = TokenPath)
         
-        answer <- POST("https://api.direct.yandex.com/json/v5/campaigns", body = queryBody, add_headers(Authorization = paste0("Bearer ",Token), 'Accept-Language' = "ru","Client-Login" = Logins[l]))
-        # check answer status
-        stop_for_status(answer)
-        dataRaw <- content(answer, "parsed", "application/json")
+        response <- request("https://api.direct.yandex.com/json/v5/campaigns") %>%
+          req_method("POST") %>%
+          req_headers(
+            Authorization = paste("Bearer", Token),
+            `Accept-Language` = "ru",
+            `Client-Login` = login
+          ) %>%
+          req_body_json(query_body) %>%
+          req_perform()
         
-        if(length(dataRaw$error) > 0){
-          stop(paste0(dataRaw$error$error_string, " - ", dataRaw$error$error_detail))
+        data_raw <- resp_body_json(response)
+        
+        if (!is.null(data_raw$error)) {
+          stop(paste0(data_raw$error$error_string, " - ", data_raw$error$error_detail))
         }
         
-        # parsing
-        for (i in 1:length(dataRaw$result$Campaigns)){
-          
-          try(result <- rbind(result,
-                              data.frame(Id                              = dataRaw$result$Campaigns[[i]]$Id,
-                                         Name                            = dataRaw$result$Campaigns[[i]]$Name,
-                                         Type                            = dataRaw$result$Campaigns[[i]]$Type,
-                                         Status                          = dataRaw$result$Campaigns[[i]]$Status,
-                                         State                           = dataRaw$result$Campaigns[[i]]$State,
-                                         StatusPayment                   = dataRaw$result$Campaigns[[i]]$StatusPayment,
-                                         SourceId                        = ifelse(is.null(dataRaw$result$Campaigns[[i]]$SourceId), NA, dataRaw$result$Campaigns[[i]]$SourceId),
-                                         DailyBudgetAmount               = ifelse(is.null(dataRaw$result$Campaigns[[i]]$DailyBudget$Amount), NA, dataRaw$result$Campaigns[[i]]$DailyBudget$Amount / 1000000),
-                                         DailyBudgetMode                 = ifelse(is.null(dataRaw$result$Campaigns[[i]]$DailyBudget$Mode), NA, dataRaw$result$Campaigns[[i]]$DailyBudget$Mode),
-                                         Currency                        = dataRaw$result$Campaigns[[i]]$Currency,
-                                         StartDate                       = dataRaw$result$Campaigns[[i]]$StartDate,
-                                         Impressions                     = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Statistics$Impressions), NA,dataRaw$result$Campaigns[[i]]$Statistics$Impressions),
-                                         Clicks                          = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Statistics$Clicks), NA,dataRaw$result$Campaigns[[i]]$Statistics$Clicks),
-                                         ClientInfo                      = dataRaw$result$Campaigns[[i]]$ClientInfo,
-                                         FundsMode                       = dataRaw$result$Campaigns[[i]]$Funds$Mode,
-                                         CampaignFundsBalance            = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$Balance), NA, dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$Balance / 1000000),
-                                         CampaignFundsBalanceBonus       = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$BalanceBonus), NA, dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$BalanceBonus / 1000000),
-                                         CampaignFundsSumAvailableForTransfer = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$SumAvailableForTransfer), NA, dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$SumAvailableForTransfer / 1000000),
-                                         SharedAccountFundsRefund        = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Funds$SharedAccountFunds$Refund), NA, dataRaw$result$Campaigns[[i]]$Funds$CampaignFunds$Refund / 1000000),
-                                         SharedAccountFundsSpend         = ifelse(is.null(dataRaw$result$Campaigns[[i]]$Funds$SharedAccountFunds$Spend), NA, dataRaw$result$Campaigns[[i]]$Funds$SharedAccountFunds$Spend / 1000000),
-                                         TextCampBidStrategySearchType   = ifelse(is.null(dataRaw$result$Campaigns[[i]]$TextCampaign$BiddingStrategy$Search$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$TextCampaign$BiddingStrategy$Search$BiddingStrategyType),
-                                         TextCampBidStrategyNetworkType  = ifelse(is.null(dataRaw$result$Campaigns[[i]]$TextCampaign$BiddingStrategy$Network$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$TextCampaign$BiddingStrategy$Network$BiddingStrategyType),
-                                         TextCampAttributionModel        = ifelse(is.null(dataRaw$result$Campaigns[[i]]$TextCampaign$AttributionModel), "", dataRaw$result$Campaigns[[i]]$TextCampaign$AttributionModel),
-                                         DynCampBidStrategySearchType    = ifelse(is.null(dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$BiddingStrategy$Search$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$BiddingStrategy$Search$BiddingStrategyType),
-                                         DynCampBidStrategyNetworkType   = ifelse(is.null(dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$BiddingStrategy$Network$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$BiddingStrategy$Network$BiddingStrategyType),
-                                         DynCampAttributionModel         = ifelse(is.null(dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$AttributionModel), "", dataRaw$result$Campaigns[[i]]$DynamicTextCampaign$AttributionModel),
-                                         MobCampBidStrategySearchType    = ifelse(is.null(dataRaw$result$Campaigns[[i]]$MobileAppCampaign$BiddingStrategy$Search$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$MobileAppCampaign$BiddingStrategy$Search$BiddingStrategyType),
-                                         MobCampBidStrategyNetworkType   = ifelse(is.null(dataRaw$result$Campaigns[[i]]$MobileAppCampaign$BiddingStrategy$Network$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$MobileAppCampaign$BiddingStrategy$Network$BiddingStrategyType),
-                                         CpmBannerBidStrategySearchType  = ifelse(is.null(dataRaw$result$Campaigns[[i]]$CpmBannerCampaign$BiddingStrategy$Search$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$CpmBannerCampaign$BiddingStrategy$Search$BiddingStrategyType),
-                                         CpmBannerBidStrategyNetworkType = ifelse(is.null(dataRaw$result$Campaigns[[i]]$CpmBannerCampaign$BiddingStrategy$Network$BiddingStrategyType), "", dataRaw$result$Campaigns[[i]]$CpmBannerCampaign$BiddingStrategy$Network$BiddingStrategyType),
-                                         Login                           = Logins[l])), silent = T)
-          
+        if (!is.null(data_raw$result$Campaigns)) {
+          df <- map_dfr(data_raw$result$Campaigns, process_campaign_data, login = login)
+          result <- bind_rows(result, df)
         }
       }
       
-      # add progres
-      packageStartupMessage(".", appendLF = F)
-      # check for next iteraction
-      lim <- ifelse(is.null(dataRaw$result$LimitedBy), "stoped",dataRaw$result$LimitedBy + 1)
+      packageStartupMessage(".", appendLF = FALSE)
+      lim <- ifelse(is.null(data_raw$result$LimitedBy), "stoped", data_raw$result$LimitedBy + 1)
     }
     
-    # convert to factor
-    result$Type     <- as.factor(result$Type)
-    result$Status   <- as.factor(result$Status)
-    result$State    <- as.factor(result$State)
-    result$Currency <- as.factor(result$Currency)
-    result$SearchBidStrategyType  <- paste0(result$TextCampBidStrategySearchType, result$DynCampBidStrategySearchType, result$MobCampBidStrategySearchType, result$CpmBannerBidStrategySearchType)
-    result$NetworkBidStrategyType <- paste0(result$TextCampBidStrategyNetworkType, result$DynCampBidStrategyNetworkType, result$MobCampBidStrategyNetworkType, result$CpmBannerBidStrategyNetworkType)
-    result$AttributionModel       <- paste0(result$TextCampAttributionModel, result$DynCampAttributionModel)
-    # removing
-    result$TextCampBidStrategySearchType   <- NULL
-    result$TextCampBidStrategyNetworkType  <- NULL
-    result$DynCampBidStrategySearchType    <- NULL
-    result$DynCampBidStrategyNetworkType   <- NULL
-    result$MobCampBidStrategySearchType    <- NULL
-    result$MobCampBidStrategyNetworkType   <- NULL
-    result$CpmBannerBidStrategySearchType  <- NULL
-    result$CpmBannerBidStrategyNetworkType <- NULL
-    result$TextCampAttributionModel        <- NULL
-    result$DynCampAttributionModel         <- NULL
-     
-    # end timr
+    result <- result %>%
+      mutate(
+        Type = as.factor(Type),
+        Status = as.factor(Status),
+        State = as.factor(State),
+        Currency = as.factor(Currency)
+      )
+    
     stop_time <- Sys.time()
     
-    # out message
-    packageStartupMessage("Done", appendLF = T)
-    packageStartupMessage(paste0("Number of load campaings: ", nrow(result)), appendLF = T)
-    packageStartupMessage(paste0("Processing durations: ", round(difftime(stop_time, start_time , units ="secs"),0), " sec."), appendLF = T)
+    packageStartupMessage("Done", appendLF = TRUE)
+    packageStartupMessage(paste0("Number of loaded campaigns: ", nrow(result)), appendLF = TRUE)
+    packageStartupMessage(paste0("Processing duration: ", round(difftime(stop_time, start_time, units = "secs"), 0), " sec."), appendLF = TRUE)
     
-    # result
     return(result)
-  }
+}
