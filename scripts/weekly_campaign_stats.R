@@ -73,6 +73,7 @@ fetch_report <- function(token, login, date_from, date_to) {
     '<FieldNames>Clicks</FieldNames>',
     '<FieldNames>Cost</FieldNames>',
     '<FieldNames>Conversions</FieldNames>',
+    '<FieldNames>AvgTrafficVolume</FieldNames>',
     '<ReportName>', report_name, '</ReportName>',
     '<ReportType>CAMPAIGN_PERFORMANCE_REPORT</ReportType>',
     '<DateRangeType>CUSTOM_DATE</DateRangeType>',
@@ -132,6 +133,7 @@ new_rows <- stats %>%
     Клики     = sum(Clicks, na.rm = TRUE),
     Расход    = round(sum(Cost, na.rm = TRUE), 2),
     Конверсии = sum(Conversions, na.rm = TRUE),
+    `Ср. объём трафика` = round(mean(AvgTrafficVolume, na.rm = TRUE), 1),
     .groups = "drop"
   ) %>%
   mutate(
@@ -150,7 +152,8 @@ new_rows <- stats %>%
     `CTR, %`,
     `CPC, ₽`,
     Конверсии,
-    `CPA, ₽`
+    `CPA, ₽`,
+    `Ср. объём трафика`
   )
 
 # ── Write to Google Sheets (accumulate) ──────────────────────────────
