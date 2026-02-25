@@ -145,6 +145,7 @@ new_rows <- stats %>%
   transmute(
     Неделя      = week_label,
     `#`         = week_sort,
+    Аккаунт     = yd_login,
     Кампания    = CampaignName,
     Показы,
     Клики,
