@@ -2,9 +2,16 @@
 # -------------------------------------------------------------------
 # Weekly Yandex Direct campaign stats → Google Sheets
 #
+# Формат таблицы:
+#   Лист "По кампаниям"  — строки = недели × кампании, метрики в столбцах
+#   Лист "Итого"         — строки = недели (сумма по всем кампаниям)
+#   Лист "Кампании"      — справочник кампаний (перезаписывается)
+#
+# Данные накапливаются: каждый запуск дописывает новую неделю.
+#
 # Required env vars (set as GitHub Secrets):
 #   YANDEX_DIRECT_TOKEN  – OAuth-токен Яндекс.Директ
-#   YANDEX_DIRECT_LOGIN  – логин аккаунта Яндекс.Директ
+#   YANDEX_DIRECT_LOGIN  – логин аккаунта / организации Яндекс.Директ
 #   GOOGLE_SHEET_ID      – ID целевой Google-таблицы
 #   GOOGLE_SA_KEY        – JSON-ключ сервисного аккаунта Google (содержимое)
 # -------------------------------------------------------------------
@@ -29,6 +36,12 @@ stop_if_missing <- function(var) {
   val
 }
 
+format_week_label <- function(date_from, date_to) {
+  wn <- format(date_from, "%V")
+  yr <- format(date_from, "%Y")
+  paste0("W", wn, " (", format(date_from, "%d.%m"), "\u2013", format(date_to, "%d.%m.%Y"), ")")
+}
+
 yd_token <- stop_if_missing("YANDEX_DIRECT_TOKEN")
 yd_login <- stop_if_missing("YANDEX_DIRECT_LOGIN")
 gs_id    <- stop_if_missing("GOOGLE_SHEET_ID")
@@ -36,7 +49,10 @@ sa_json  <- stop_if_missing("GOOGLE_SA_KEY")
 
 date_to   <- Sys.Date() - 1
 date_from <- date_to - 6
-message("Report period: ", date_from, " — ", date_to)
+week_label <- format_week_label(date_from, date_to)
+week_sort  <- format(date_from, "%Y-W%V")
+
+message("Report period: ", date_from, " \u2014 ", date_to, "  [", week_label, "]")
 
 # ── Google Sheets auth (service account) ─────────────────────────────
 
@@ -60,8 +76,7 @@ fetch_campaigns <- function(token, login) {
         ),
         FieldNames = c(
           "Id", "Name", "Type", "State", "Status",
-          "StartDate", "Statistics", "Currency",
-          "DailyBudget", "Funds"
+          "StartDate", "Currency", "DailyBudget"
         ),
         Page = list(Limit = 10000, Offset = offset)
       )
@@ -81,7 +96,7 @@ fetch_campaigns <- function(token, login) {
     data <- content(resp, "parsed", "application/json")
 
     if (!is.null(data$error)) {
-      stop(data$error$error_string, " — ", data$error$error_detail)
+      stop(data$error$error_string, " \u2014 ", data$error$error_detail)
     }
 
     if (length(data$result$Campaigns) > 0) {
@@ -96,18 +111,13 @@ fetch_campaigns <- function(token, login) {
 
   map_dfr(all_campaigns, function(c) {
     tibble(
-      CampaignId       = safe(c$Id),
-      CampaignName     = safe(c$Name),
-      CampaignType     = safe(c$Type),
-      State            = safe(c$State),
-      Status           = safe(c$Status),
-      Currency         = safe(c$Currency),
-      StartDate        = safe(c$StartDate),
-      DailyBudget      = safe(c$DailyBudget$Amount, 0) / 1e6,
-      TotalImpressions = safe(c$Statistics$Impressions, 0),
-      TotalClicks      = safe(c$Statistics$Clicks, 0),
-      FundsMode        = safe(c$Funds$Mode),
-      AccountSpend     = safe(c$Funds$SharedAccountFunds$Spend, 0) / 1e6
+      ID               = safe(c$Id),
+      Кампания         = safe(c$Name),
+      Тип              = safe(c$Type),
+      Статус           = safe(c$State),
+      Валюта           = safe(c$Currency),
+      `Дата старта`    = safe(c$StartDate),
+      `Дневной бюджет` = safe(c$DailyBudget$Amount, 0) / 1e6
     )
   })
 }
@@ -127,16 +137,12 @@ fetch_report <- function(token, login, date_from, date_to) {
     '<DateFrom>', date_from, '</DateFrom>',
     '<DateTo>', date_to, '</DateTo>',
     '</SelectionCriteria>',
-    '<FieldNames>Date</FieldNames>',
     '<FieldNames>CampaignId</FieldNames>',
     '<FieldNames>CampaignName</FieldNames>',
     '<FieldNames>Impressions</FieldNames>',
     '<FieldNames>Clicks</FieldNames>',
     '<FieldNames>Cost</FieldNames>',
-    '<FieldNames>Ctr</FieldNames>',
-    '<FieldNames>AvgCpc</FieldNames>',
     '<FieldNames>Conversions</FieldNames>',
-    '<FieldNames>CostPerConversion</FieldNames>',
     '<ReportName>', report_name, '</ReportName>',
     '<ReportType>CAMPAIGN_PERFORMANCE_REPORT</ReportType>',
     '<DateRangeType>CUSTOM_DATE</DateRangeType>',
@@ -179,7 +185,7 @@ fetch_report <- function(token, login, date_from, date_to) {
   }
 
   suppressMessages(
-    read_tsv(content(resp, "text", encoding = "UTF-8"))
+    read_tsv(I(content(resp, "text", encoding = "UTF-8")))
   )
 }
 
@@ -187,50 +193,98 @@ message("Fetching weekly stats report...")
 stats <- fetch_report(yd_token, yd_login, date_from, date_to)
 message("Stats rows loaded: ", nrow(stats))
 
-# ── Prepare summary sheet ────────────────────────────────────────────
+# ── Build weekly rows per campaign ───────────────────────────────────
 
-summary_stats <- stats %>%
+by_campaign <- stats %>%
   group_by(CampaignId, CampaignName) %>%
   summarise(
-    Impressions       = sum(Impressions, na.rm = TRUE),
-    Clicks            = sum(Clicks, na.rm = TRUE),
-    Cost              = sum(Cost, na.rm = TRUE),
-    Conversions       = sum(Conversions, na.rm = TRUE),
-    AvgCTR            = ifelse(sum(Impressions, na.rm = TRUE) > 0,
-                               sum(Clicks, na.rm = TRUE) / sum(Impressions, na.rm = TRUE) * 100, 0),
-    AvgCPC            = ifelse(sum(Clicks, na.rm = TRUE) > 0,
-                               sum(Cost, na.rm = TRUE) / sum(Clicks, na.rm = TRUE), 0),
-    CostPerConversion = ifelse(sum(Conversions, na.rm = TRUE) > 0,
-                               sum(Cost, na.rm = TRUE) / sum(Conversions, na.rm = TRUE), 0),
+    Показы     = sum(Impressions, na.rm = TRUE),
+    Клики      = sum(Clicks, na.rm = TRUE),
+    Расход     = round(sum(Cost, na.rm = TRUE), 2),
+    Конверсии  = sum(Conversions, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  arrange(desc(Cost))
+  mutate(
+    `CTR, %`  = round(ifelse(Показы > 0, Клики / Показы * 100, 0), 2),
+    `CPC, ₽`  = round(ifelse(Клики > 0, Расход / Клики, 0), 2),
+    `CPA, ₽`  = round(ifelse(Конверсии > 0, Расход / Конверсии, 0), 2)
+  ) %>%
+  arrange(desc(Расход))
 
-run_meta <- tibble(
-  Parameter = c("Login", "Period start", "Period end",
-                "Total campaigns", "Total impressions",
-                "Total clicks", "Total cost", "Report generated at"),
-  Value = c(
-    yd_login,
-    as.character(date_from),
-    as.character(date_to),
-    as.character(nrow(summary_stats)),
-    as.character(sum(summary_stats$Impressions)),
-    as.character(sum(summary_stats$Clicks)),
-    as.character(round(sum(summary_stats$Cost), 2)),
-    format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
+new_campaign_rows <- by_campaign %>%
+  transmute(
+    Неделя    = week_label,
+    `#`       = week_sort,
+    Кампания  = CampaignName,
+    Показы,
+    Клики,
+    `Расход, ₽` = Расход,
+    `CTR, %`,
+    `CPC, ₽`,
+    Конверсии,
+    `CPA, ₽`
   )
+
+# ── Build weekly totals row ──────────────────────────────────────────
+
+total_impressions  <- sum(by_campaign$Показы)
+total_clicks       <- sum(by_campaign$Клики)
+total_cost         <- sum(by_campaign$Расход)
+total_conversions  <- sum(by_campaign$Конверсии)
+
+new_total_row <- tibble(
+  Неделя       = week_label,
+  `#`          = week_sort,
+  Кампаний     = nrow(by_campaign),
+  Показы       = total_impressions,
+  Клики        = total_clicks,
+  `Расход, ₽`  = round(total_cost, 2),
+  `CTR, %`     = round(ifelse(total_impressions > 0, total_clicks / total_impressions * 100, 0), 2),
+  `CPC, ₽`     = round(ifelse(total_clicks > 0, total_cost / total_clicks, 0), 2),
+  Конверсии    = total_conversions,
+  `CPA, ₽`     = round(ifelse(total_conversions > 0, total_cost / total_conversions, 0), 2)
 )
 
-# ── Write to Google Sheets ───────────────────────────────────────────
+# ── Write to Google Sheets (accumulate) ──────────────────────────────
 
-sheet_names <- tryCatch(
+existing_sheets <- tryCatch(
   sheet_names(gs_id),
   error = function(e) character(0)
 )
 
+append_or_create <- function(sheet_id, sheet_name, new_data, sort_col = "#") {
+  if (sheet_name %in% existing_sheets) {
+    old_data <- tryCatch(
+      read_sheet(sheet_id, sheet = sheet_name),
+      error = function(e) tibble()
+    )
+
+    if (nrow(old_data) > 0 && sort_col %in% names(old_data)) {
+      week_key <- new_data[[sort_col]][1]
+      old_data <- old_data %>% filter(.data[[sort_col]] != week_key)
+    }
+
+    combined <- bind_rows(old_data, new_data) %>%
+      arrange(.data[[sort_col]])
+
+    range_clear(sheet_id, sheet = sheet_name)
+    range_write(sheet_id, combined, sheet = sheet_name)
+  } else {
+    sheet_add(sheet_id, sheet = sheet_name)
+    range_write(sheet_id, new_data, sheet = sheet_name)
+  }
+}
+
+message("Writing to Google Sheets...")
+
+append_or_create(gs_id, "\u041f\u043e \u043a\u0430\u043c\u043f\u0430\u043d\u0438\u044f\u043c", new_campaign_rows)
+message("  \u2713 \u041f\u043e \u043a\u0430\u043c\u043f\u0430\u043d\u0438\u044f\u043c")
+
+append_or_create(gs_id, "\u0418\u0442\u043e\u0433\u043e", new_total_row)
+message("  \u2713 \u0418\u0442\u043e\u0433\u043e")
+
 write_or_create <- function(sheet_id, sheet_name, data) {
-  if (sheet_name %in% sheet_names) {
+  if (sheet_name %in% existing_sheets) {
     range_clear(sheet_id, sheet = sheet_name)
   } else {
     sheet_add(sheet_id, sheet = sheet_name)
@@ -238,18 +292,21 @@ write_or_create <- function(sheet_id, sheet_name, data) {
   range_write(sheet_id, data, sheet = sheet_name)
 }
 
-message("Writing to Google Sheets...")
+write_or_create(gs_id, "\u041a\u0430\u043c\u043f\u0430\u043d\u0438\u0438", campaigns)
+message("  \u2713 \u041a\u0430\u043c\u043f\u0430\u043d\u0438\u0438")
 
-write_or_create(gs_id, "Meta", run_meta)
-message("  ✓ Meta")
+# Clean up default Sheet1 if present
+if ("Sheet1" %in% existing_sheets || "\u041b\u0438\u0441\u04421" %in% existing_sheets) {
+  tryCatch({
+    if ("Sheet1" %in% existing_sheets) sheet_delete(gs_id, sheet = "Sheet1")
+    if ("\u041b\u0438\u0441\u04421" %in% existing_sheets) sheet_delete(gs_id, sheet = "\u041b\u0438\u0441\u04421")
+  }, error = function(e) NULL)
+}
 
-write_or_create(gs_id, "Campaigns", campaigns)
-message("  ✓ Campaigns")
-
-write_or_create(gs_id, "WeeklyStats", stats)
-message("  ✓ WeeklyStats (daily breakdown)")
-
-write_or_create(gs_id, "Summary", summary_stats)
-message("  ✓ Summary (aggregated by campaign)")
-
-message("Done! Data exported to Google Sheets: https://docs.google.com/spreadsheets/d/", gs_id)
+message("\nDone! Data exported to Google Sheets:")
+message("  https://docs.google.com/spreadsheets/d/", gs_id)
+message("\n  \u041d\u0435\u0434\u0435\u043b\u044f: ", week_label)
+message("  \u041f\u043e\u043a\u0430\u0437\u044b: ", total_impressions,
+        " | \u041a\u043b\u0438\u043a\u0438: ", total_clicks,
+        " | \u0420\u0430\u0441\u0445\u043e\u0434: ", round(total_cost, 2), " \u20bd",
+        " | \u041a\u043e\u043d\u0432\u0435\u0440\u0441\u0438\u0438: ", total_conversions)
