@@ -42,10 +42,12 @@ yd_login <- stop_if_missing("YANDEX_DIRECT_LOGIN")
 gs_id    <- stop_if_missing("GOOGLE_SHEET_ID")
 sa_json  <- stop_if_missing("GOOGLE_SA_KEY")
 
-date_to   <- Sys.Date() - 1
-date_from <- date_to - 6
+today     <- Sys.Date()
+wday      <- as.integer(format(today, "%u"))  # 1=пн ... 7=вс
+date_from <- today - wday - 6                 # понедельник прошлой недели
+date_to   <- date_from + 6                    # воскресенье прошлой недели
 week_label <- format_week_label(date_from, date_to)
-week_sort  <- format(date_from, "%Y-W%V")
+week_sort  <- format(date_from, "%G-W%V")
 
 message("Report period: ", date_from, " \u2014 ", date_to, "  [", week_label, "]")
 
@@ -170,7 +172,7 @@ message("Writing to Google Sheets...")
 
 if (SHEET_NAME %in% existing_sheets) {
   old_data <- tryCatch(
-    read_sheet(gs_id, sheet = SHEET_NAME),
+    read_sheet(gs_id, sheet = SHEET_NAME, col_types = "c"),
     error = function(e) tibble()
   )
 
@@ -178,7 +180,15 @@ if (SHEET_NAME %in% existing_sheets) {
     old_data <- old_data %>% filter(`#` != week_sort)
   }
 
-  combined <- bind_rows(old_data, new_rows) %>% arrange(`#`, desc(`Расход, ₽`))
+  new_rows_c <- new_rows %>% mutate(across(everything(), as.character))
+  combined <- bind_rows(old_data, new_rows_c) %>% arrange(`#`, desc(`Расход, ₽`))
+
+  num_cols <- c("Показы", "Клики", "Расход, ₽", "CTR, %", "CPC, ₽",
+                "Конверсии", "CPA, ₽", "Ср. объём трафика")
+  for (col in intersect(num_cols, names(combined))) {
+    combined[[col]] <- as.numeric(combined[[col]])
+  }
+
   range_clear(gs_id, sheet = SHEET_NAME)
   range_write(gs_id, combined, sheet = SHEET_NAME)
 } else {
