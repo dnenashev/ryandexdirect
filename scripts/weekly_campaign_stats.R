@@ -2,14 +2,17 @@
 # -------------------------------------------------------------------
 # Weekly Yandex Direct campaign stats → Google Sheets
 #
-# Одна вкладка, строки = недели × кампании, метрики в столбцах.
+# Поддержка нескольких аккаунтов. Одна вкладка «Статистика».
 # Данные накапливаются: каждый запуск дописывает новую неделю.
 #
-# Required env vars (set as GitHub Secrets):
-#   YANDEX_DIRECT_TOKEN  – OAuth-токен Яндекс.Директ
-#   YANDEX_DIRECT_LOGIN  – логин аккаунта / организации Яндекс.Директ
+# Env vars (GitHub Secrets):
+#   YANDEX_ACCOUNTS      – JSON-массив аккаунтов:
+#                          [{"login":"porg-xxx","token":"y0__..."},...]
 #   GOOGLE_SHEET_ID      – ID целевой Google-таблицы
-#   GOOGLE_SA_KEY        – JSON-ключ сервисного аккаунта Google (содержимое)
+#   GOOGLE_SA_KEY        – JSON-ключ сервисного аккаунта Google
+#
+# Для обратной совместимости также поддерживается:
+#   YANDEX_DIRECT_TOKEN  + YANDEX_DIRECT_LOGIN  (один аккаунт)
 # -------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -37,31 +40,47 @@ format_week_label <- function(date_from, date_to) {
   paste0("W", wn, " (", format(date_from, "%d.%m"), "\u2013", format(date_to, "%d.%m"), ")")
 }
 
-yd_token <- stop_if_missing("YANDEX_DIRECT_TOKEN")
-yd_login <- stop_if_missing("YANDEX_DIRECT_LOGIN")
-gs_id    <- stop_if_missing("GOOGLE_SHEET_ID")
-sa_json  <- stop_if_missing("GOOGLE_SA_KEY")
+# ── parse accounts ───────────────────────────────────────────────────
+
+accounts_json <- Sys.getenv("YANDEX_ACCOUNTS")
+
+if (accounts_json != "") {
+  accounts <- fromJSON(accounts_json)
+  message("Accounts from YANDEX_ACCOUNTS: ", nrow(accounts))
+} else {
+  accounts <- data.frame(
+    login = stop_if_missing("YANDEX_DIRECT_LOGIN"),
+    token = stop_if_missing("YANDEX_DIRECT_TOKEN"),
+    stringsAsFactors = FALSE
+  )
+  message("Single account: ", accounts$login[1])
+}
+
+gs_id   <- stop_if_missing("GOOGLE_SHEET_ID")
+sa_json <- stop_if_missing("GOOGLE_SA_KEY")
+
+# ── date range: last completed calendar week (Mon–Sun) ───────────────
 
 today     <- Sys.Date()
-wday      <- as.integer(format(today, "%u"))  # 1=пн ... 7=вс
-date_from <- today - wday - 6                 # понедельник прошлой недели
-date_to   <- date_from + 6                    # воскресенье прошлой недели
+wday      <- as.integer(format(today, "%u"))
+date_from <- today - wday - 6
+date_to   <- date_from + 6
 week_label <- format_week_label(date_from, date_to)
 week_sort  <- format(date_from, "%G-W%V")
 
 message("Report period: ", date_from, " \u2014 ", date_to, "  [", week_label, "]")
 
-# ── Google Sheets auth (service account) ─────────────────────────────
+# ── Google Sheets auth ───────────────────────────────────────────────
 
 sa_path <- tempfile(fileext = ".json")
 writeLines(sa_json, sa_path)
 gs4_auth(path = sa_path)
 message("Google Sheets auth OK")
 
-# ── Yandex Direct: weekly statistics report ──────────────────────────
+# ── fetch report from Yandex Direct ─────────────────────────────────
 
 fetch_report <- function(token, login, date_from, date_to) {
-  report_name <- paste0("WeeklyStats_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+  report_name <- paste0("Weekly_", login, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
 
   body_xml <- paste0(
     '<ReportDefinition xmlns="http://api.direct.yandex.com/v5/reports">',
@@ -103,7 +122,6 @@ fetch_report <- function(token, login, date_from, date_to) {
   }
 
   resp <- send_request()
-
   retries <- 0
   while (resp$status_code %in% c(201, 202) && retries < 60) {
     message("  report queued (", resp$status_code, "), waiting 5s...")
@@ -113,53 +131,66 @@ fetch_report <- function(token, login, date_from, date_to) {
   }
 
   if (resp$status_code != 200) {
-    stop("Report request failed with status ", resp$status_code,
-         ": ", content(resp, "text", encoding = "UTF-8"))
+    warning("Report failed for ", login, ": status ", resp$status_code)
+    return(tibble())
   }
 
-  suppressMessages(
-    read_tsv(I(content(resp, "text", encoding = "UTF-8")))
-  )
+  suppressMessages(read_tsv(I(content(resp, "text", encoding = "UTF-8"))))
 }
 
-message("Fetching weekly stats report...")
-stats <- fetch_report(yd_token, yd_login, date_from, date_to)
-message("Stats rows loaded: ", nrow(stats))
+# ── collect data from all accounts ───────────────────────────────────
 
-# ── Build weekly rows per campaign ───────────────────────────────────
+all_new_rows <- tibble()
 
-new_rows <- stats %>%
-  group_by(CampaignId, CampaignName) %>%
-  summarise(
-    Показы    = sum(Impressions, na.rm = TRUE),
-    Клики     = sum(Clicks, na.rm = TRUE),
-    Расход    = round(sum(Cost, na.rm = TRUE), 2),
-    Конверсии = sum(Conversions, na.rm = TRUE),
-    `Ср. объём трафика` = round(mean(AvgTrafficVolume, na.rm = TRUE), 1),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    `CTR, %` = round(ifelse(Показы > 0, Клики / Показы * 100, 0), 2),
-    `CPC, ₽` = round(ifelse(Клики > 0, Расход / Клики, 0), 2),
-    `CPA, ₽` = round(ifelse(Конверсии > 0, Расход / Конверсии, 0), 2)
-  ) %>%
-  arrange(desc(Расход)) %>%
-  transmute(
-    Неделя      = week_label,
-    `#`         = week_sort,
-    Аккаунт     = yd_login,
-    Кампания    = CampaignName,
-    Показы,
-    Клики,
-    `Расход, ₽` = Расход,
-    `CTR, %`,
-    `CPC, ₽`,
-    Конверсии,
-    `CPA, ₽`,
-    `Ср. объём трафика`
-  )
+for (i in seq_len(nrow(accounts))) {
+  acc_login <- accounts$login[i]
+  acc_token <- accounts$token[i]
+  message("\n[", i, "/", nrow(accounts), "] ", acc_login)
 
-# ── Write to Google Sheets (accumulate) ──────────────────────────────
+  stats <- fetch_report(acc_token, acc_login, date_from, date_to)
+  if (nrow(stats) == 0) {
+    message("  (no data)")
+    next
+  }
+
+  rows <- stats %>%
+    group_by(CampaignId, CampaignName) %>%
+    summarise(
+      Показы    = sum(Impressions, na.rm = TRUE),
+      Клики     = sum(Clicks, na.rm = TRUE),
+      Расход    = round(sum(Cost, na.rm = TRUE), 2),
+      Конверсии = sum(Conversions, na.rm = TRUE),
+      `Ср. объём трафика` = round(mean(AvgTrafficVolume, na.rm = TRUE), 1),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `CTR, %` = round(ifelse(Показы > 0, Клики / Показы * 100, 0), 2),
+      `CPC, ₽` = round(ifelse(Клики > 0, Расход / Клики, 0), 2),
+      `CPA, ₽` = round(ifelse(Конверсии > 0, Расход / Конверсии, 0), 2)
+    ) %>%
+    arrange(desc(Расход)) %>%
+    transmute(
+      Неделя      = week_label,
+      `#`         = week_sort,
+      Аккаунт     = acc_login,
+      Кампания    = CampaignName,
+      Показы,
+      Клики,
+      `Расход, ₽` = Расход,
+      `CTR, %`,
+      `CPC, ₽`,
+      Конверсии,
+      `CPA, ₽`,
+      `Ср. объём трафика`
+    )
+
+  all_new_rows <- bind_rows(all_new_rows, rows)
+  message("  ", nrow(rows), " campaigns, cost: ", sum(rows$`Расход, ₽`))
+}
+
+message("\nNew rows total: ", nrow(all_new_rows))
+
+# ── write to Google Sheets (accumulate) ──────────────────────────────
 
 SHEET_NAME <- "Статистика"
 
@@ -180,8 +211,8 @@ if (SHEET_NAME %in% existing_sheets) {
     old_data <- old_data %>% filter(`#` != week_sort)
   }
 
-  new_rows_c <- new_rows %>% mutate(across(everything(), as.character))
-  combined <- bind_rows(old_data, new_rows_c) %>% arrange(`#`, desc(`Расход, ₽`))
+  new_rows_c <- all_new_rows %>% mutate(across(everything(), as.character))
+  combined <- bind_rows(old_data, new_rows_c) %>% arrange(`#`, Аккаунт, desc(`Расход, ₽`))
 
   num_cols <- c("Показы", "Клики", "Расход, ₽", "CTR, %", "CPC, ₽",
                 "Конверсии", "CPA, ₽", "Ср. объём трафика")
@@ -193,7 +224,7 @@ if (SHEET_NAME %in% existing_sheets) {
   range_write(gs_id, combined, sheet = SHEET_NAME)
 } else {
   sheet_add(gs_id, sheet = SHEET_NAME)
-  range_write(gs_id, new_rows, sheet = SHEET_NAME)
+  range_write(gs_id, all_new_rows, sheet = SHEET_NAME)
 }
 
 message("  \u2713 ", SHEET_NAME)
@@ -204,8 +235,10 @@ for (s in setdiff(existing_sheets, SHEET_NAME)) {
 }
 
 message("\nDone! https://docs.google.com/spreadsheets/d/", gs_id)
+total_cost <- sum(all_new_rows$`Расход, ₽`)
 message("\n  ", week_label)
-message("  Показы: ", sum(new_rows$Показы),
-        " | Клики: ", sum(new_rows$Клики),
-        " | Расход: ", sum(new_rows$`Расход, ₽`), " \u20bd",
-        " | Конверсии: ", sum(new_rows$Конверсии))
+message("  Аккаунтов: ", nrow(accounts),
+        " | Показы: ", sum(all_new_rows$Показы),
+        " | Клики: ", sum(all_new_rows$Клики),
+        " | Расход: ", round(total_cost, 2), " \u20bd",
+        " | Конверсии: ", sum(all_new_rows$Конверсии))
