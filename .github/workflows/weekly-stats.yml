@@ -13,6 +13,7 @@ jobs:
   export-stats:
     runs-on: ubuntu-latest
     env:
+      YANDEX_ACCOUNTS: ${{ secrets.YANDEX_ACCOUNTS }}
       YANDEX_DIRECT_TOKEN: ${{ secrets.YANDEX_DIRECT_TOKEN }}
       YANDEX_DIRECT_LOGIN: ${{ secrets.YANDEX_DIRECT_LOGIN }}
       GOOGLE_SHEET_ID:     ${{ secrets.GOOGLE_SHEET_ID }}
